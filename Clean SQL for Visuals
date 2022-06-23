@@ -1,0 +1,250 @@
+CREATE TABLE austin_zillow AS SELECT city,-- reducing zillow_listings to only austin houses/apartments/condos/townhomes
+                                     zipcode,
+                                     description,
+                                     latitude,
+                                     longitude,
+                                     hasAssociation,
+                                     homeType,
+                                     parkingSpaces,
+                                     yearBuilt,
+                                     latestPrice,
+                                     latestPrice / lotSizeSqFt AS price_per_sqft,
+                                     strftime('%m/01/%Y', latest_saledate) AS date,
+                                     strftime('%m/%Y', latest_saledate) AS year_mo,
+                                     latest_saledate,
+                                     latest_salemonth,
+                                     latest_saleyear,
+                                     numOfCommunityFeatures,
+                                     lotSizeSqFt,
+                                     avgSchoolDistance,
+                                     numOfBathrooms,
+                                     numOfBedrooms,
+                                     numOfStories
+                                FROM zillow_listing
+                               WHERE city = 'austin' AND 
+                                     homeType NOT IN ('Mobile / Manufactured', 'Other', 'Vacant Land', 'MultiFamily');-- 
+
+SELECT COUNT( * ),
+       homeType
+  FROM austin_zillow
+ GROUP BY 2;-- 
+-- Visual 1: Count of Home Types sold over time w/ avg price per sqft
+WITH avg AS (-- Average price per sq ft over time
+    SELECT year_mo,
+           date,
+           ROUND(AVG(latestPrice / lotSizeSqFt), 2) AS price_per_sqft,
+           ROUND(AVG(lotSizeSqFt), 0) AS lot_size,
+           ROUND(AVG(latestPrice), 0) / 1000 AS price
+      FROM austin_zillow
+     GROUP BY 1
+)
+SELECT homeType,
+       COUNT(homeType) AS count,
+       austin_zillow.date,
+       austin_zillow.year_mo,
+       avg.price_per_sqft,
+       avg.lot_size,
+       avg.price
+  FROM austin_zillow
+       LEFT JOIN
+       (
+           SELECT *
+             FROM avg
+       )
+       avg ON avg.year_mo = austin_zillow.year_mo
+ GROUP BY austin_zillow.year_mo,
+          homeType;-- 
+-- looking at types of properties that are not "Entire" units
+SELECT COUNT( * ),
+       property_type
+  FROM airbnb_listing
+ WHERE room_type = 'Entire home/apt' AND 
+       property_type NOT LIKE 'Entire%'
+ GROUP BY property_type
+ ORDER BY 1 DESC;-- 
+-- number of listings on airbnb data
+SELECT COUNT( * ) 
+  FROM airbnb_listing;
+
+;
+
+SELECT strftime('%Y', first_review) AS yr,
+       COUNT( * ) AS no_of_reviews
+  FROM airbnb_listing
+ WHERE room_type = 'Entire home/apt' AND 
+       property_type LIKE 'Entire%' AND 
+       CAST (minimum_nights AS INT) < 30 AND 
+       first_review IS NOT ''
+ GROUP BY 1
+ ORDER BY 1;-- 
+-- Visual 3: airbnb prices on average per type of stay
+WITH overall_avg AS (
+    SELECT 'Average (all zipcodes)' AS zipcode,
+           CAST (bedrooms AS INTEGER) AS bedrooms,
+           COUNT( * ) AS count,
+           ROUND(AVG(CAST (substr([REPLACE](price, ',', ''), 2, length(price) - 1) AS FLOAT) ), 2) AS price,
+           ROUND(AVG(CAST (substr([REPLACE](price, ',', ''), 2, length(price) - 1) AS FLOAT) ) * 30, 2) AS monthly_runrate
+      FROM airbnb_listing
+     WHERE room_type = 'Entire home/apt' AND 
+           property_type LIKE 'Entire%' AND-- dropping stays that are not likely to be full-time living units 
+           CAST (bedrooms AS INTEGER) < 4
+     GROUP BY 2
+     ORDER BY 2 DESC
+),
+pop_airbnb_zip AS (
+    SELECT neighbourhood_cleansed AS zipcode,
+           COUNT( * ) 
+      FROM airbnb_listing
+     WHERE room_type = 'Entire home/apt' AND 
+           property_type LIKE 'Entire%'
+     GROUP BY neighbourhood_cleansed
+     ORDER BY 2 DESC
+     LIMIT 3
+),
+popular_avg AS (
+    SELECT neighbourhood_cleansed AS zipcode,
+           CAST (bedrooms AS INTEGER) AS bedrooms,
+           COUNT( * ) AS count,
+           ROUND(AVG(CAST (substr([REPLACE](price, ',', ''), 2, length(price) - 1) AS FLOAT) ), 2) AS price,
+           ROUND(AVG(CAST (substr([REPLACE](price, ',', ''), 2, length(price) - 1) AS FLOAT) ) * 30, 2) AS monthly_runrate
+      FROM airbnb_listing
+     WHERE neighbourhood_cleansed IN (
+               SELECT zipcode
+                 FROM pop_airbnb_zip
+           )
+AND 
+           CAST (bedrooms AS INTEGER) < 4
+     GROUP BY 1,
+              2
+     ORDER BY 2
+)
+SELECT *
+  FROM popular_avg
+UNION
+SELECT *
+  FROM overall_avg;-- 
+-- Visual: robbery, theft, and murder over time
+SELECT COUNT( * ) AS count,
+       [Highest Offense Description],
+       strftime('%Y', date(substr("OCCURRED DATE", 7, 4) || '-' || substr("OCCURRED DATE", 0, 3) || '-' || substr("OCCURRED DATE", 4, 2) ) ) AS year-- strftime('%m/01/%Y', date(substr("OCCURRED DATE", 7, 4) || '-' || substr("OCCURRED DATE", 0, 3) || '-' || substr("OCCURRED DATE", 4, 2) ) ) AS date,
+  FROM gov_crime
+ WHERE ([Highest Offense Description] LIKE '%MURDER%') OR 
+       ([Highest Offense Description] LIKE '%ROBBERY%') OR 
+       ([Highest Offense Description] LIKE '%THEFT%') 
+ GROUP BY 3,
+          2;-- 
+-- Visual: gov authorized licenses x # airbnbs
+WITH licenses AS (
+    SELECT prop_zip,
+           COUNT( * ) AS license_count
+      FROM gov_authorized_rentals
+     GROUP BY 1
+),
+ab AS (
+    SELECT neighbourhood_cleansed AS zipcode,
+           COUNT( * ) AS airbnb_count
+      FROM airbnb_listing
+     WHERE CAST (minimum_nights AS INT) < 30
+     GROUP BY neighbourhood_cleansed
+)
+SELECT zipcode,
+       airbnb_count,
+       IFNULL(license_count, 0) AS license_count,
+       ROUND(100 - CAST (IFNULL(license_count, 0) AS REAL) / CAST (airbnb_count AS REAL) * 100, 2) AS pct_unlicensed
+  FROM ab
+       LEFT JOIN
+       licenses ON ab.zipcode = licenses.prop_zip
+ ORDER BY 2 DESC;-- 
+-- number of airbnb hosts not in Austin
+SELECT COUNT( * ) AS count,
+       host_location AS location
+  FROM airbnb_listing
+ WHERE room_type = 'Entire home/apt' AND 
+       property_type LIKE 'Entire%' AND 
+       CAST (minimum_nights AS INT) < 30
+ GROUP BY 2;-- 
+-- Visual: pulling descriptions for expensive neighborhoods (word cloud)
+WITH avg_num_sales AS (-- Focusing on more popular neighborhoods, as opposed to zipcodes that only sell a few houses a year
+    SELECT AVG(count) AS count
+      FROM (
+               SELECT COUNT( * ) AS count,
+                      zipcode
+                 FROM austin_zillow
+                GROUP BY zipcode
+                ORDER BY 1 DESC
+           )
+),
+expensive_zipcodes AS (-- Identify expensive zipcodes by their average price per sq ft
+    SELECT zipcode,
+           AVG(latestPrice / lotSizeSqFt) AS avg_price_per_sqft,
+           COUNT( * ) AS count
+      FROM austin_zillow
+     GROUP BY zipcode
+    HAVING count > (-- filter to neighborhoods with more than avg amt of sales
+                       SELECT count
+                         FROM avg_num_sales
+                   )
+     ORDER BY 2 DESC
+     LIMIT 3
+)
+SELECT neighbourhood_cleansed AS zipcode,
+       description
+  FROM airbnb_listing
+ WHERE neighbourhood_cleansed IN (
+           SELECT zipcode
+             FROM expensive_zipcodes
+       );-- 
+-- visual removed: coexisting properties between airbnb and zillow was not as interesting as expected
+SELECT *
+  FROM airbnb_listing
+       JOIN
+       austin_zillow ON ROUND(CAST (airbnb_listing.latitude AS FLOAT), 4) = ROUND(CAST (austin_zillow.latitude AS FLOAT), 4) AND 
+                        ROUND(CAST (airbnb_listing.longitude AS FLOAT), 4) = ROUND(CAST (austin_zillow.longitude AS FLOAT), 4) 
+ WHERE airbnb_listing.room_type = 'Entire home/apt' AND 
+       airbnb_listing.property_type LIKE 'Entire%' AND 
+       CAST (minimum_nights AS INT) < 30;-- 
+-- Visual removed: number of condos over time, turns out to be not very insightful
+SELECT year_mo,
+       date,
+       COUNT( * ) AS condo_townhouse_count
+  FROM austin_zillow
+ WHERE homeType = 'Condo' OR 
+       homeType = 'Townhouse'
+ GROUP BY 1;-- 
+-- Visual removed: most expensive zipcodes by price per sqft
+WITH avg_num_sales AS (-- Focusing on more popular neighborhoods, as opposed to zipcodes that only sell a few houses a year
+    SELECT AVG(count) AS count
+      FROM (
+               SELECT COUNT( * ) AS count,
+                      zipcode
+                 FROM austin_zillow
+                GROUP BY zipcode
+                ORDER BY 1 DESC
+           )
+),
+expensive_zipcodes AS (-- Identify expensive zipcodes by their average price per sq ft
+    SELECT zipcode,
+           AVG(latestPrice / lotSizeSqFt) AS avg_price_per_sqft,
+           COUNT( * ) AS count
+      FROM austin_zillow
+     GROUP BY zipcode
+    HAVING count > (-- filter to neighborhoods with more than avg amt of sales
+                       SELECT count
+                         FROM avg_num_sales
+                   )
+     ORDER BY 2 DESC
+     LIMIT 3
+)
+SELECT zipcode,
+       year_mo,
+       date,
+       ROUND(AVG(price_per_sqft), 2) AS avg_price_per_sqft,
+       ROUND(AVG(lotSizeSqFt), 0) AS lot_size,
+       ROUND(AVG(latestPrice), 0) AS avg_price
+  FROM austin_zillow
+ WHERE zipcode IN (
+           SELECT zipcode
+             FROM expensive_zipcodes
+       )
+ GROUP BY 1,
+          2;-- 
