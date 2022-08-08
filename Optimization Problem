@@ -1,0 +1,37 @@
+--Having issues with running total. Planning to come back
+
+WITH sales AS(
+  SELECT
+  	EXTRACT(MONTH FROM date.caldate) AS month_num,
+    catname,
+    COALESCE(venuename, CONCAT('venue_', event.venueid)) AS venuename2,
+    eventname,
+    sales.eventid,
+  	SUM(qtysold*pricepaid) AS rev
+  FROM sales
+  LEFT JOIN date
+  	ON sales.dateid = date.dateid
+  LEFT JOIN event
+  	ON event.eventid = sales.eventid
+  LEFT JOIN category
+  	ON category.catid = event.catid
+  LEFT JOIN venue
+  	ON venue.venueid = event.venueid
+  GROUP BY month_num, catname, venuename2, eventname, sales.eventid
+)
+
+SELECT
+  month_num,
+  SUM(rev) OVER(PARTITION BY month_num) AS month_rev,
+  catname,
+  SUM(rev) OVER(PARTITION BY month_num, catname) AS cat_rev,
+  venuename2,
+  SUM(rev) OVER(PARTITION BY month_num, catname, venuename2) AS venue_rev,
+  SUM(rev) OVER(PARTITION BY venuname2 ORDER BY month_num ROWS )
+  eventname,
+  eventid,
+  SUM(rev) OVER(PARTITION BY month_num, catname, venuename2, sales2.eventid) AS eventid_rev,
+  SUM(rev) OVER(PARTITION BY sales2.eventid ORDER BY month_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS eventid_RT
+FROM sales2
+WHERE venuename2 = 'LP Field'
+ORDER BY month_num, cat_rev DESC, venue_rev DESC, eventid_rev DESC
