@@ -1,5 +1,5 @@
---Having issues with running total. Planning to come back
-
+/* Handling duplicate rows since sales data contains multiple rows for 1 event: 
+https://stackoverflow.com/questions/19601948/must-appear-in-the-group-by-clause-or-be-used-in-an-aggregate-function */
 WITH sales AS(
   SELECT
   	EXTRACT(MONTH FROM date.caldate) AS month_num,
@@ -7,7 +7,17 @@ WITH sales AS(
     COALESCE(venuename, CONCAT('venue_', event.venueid)) AS venuename2,
     eventname,
     sales.eventid,
-  	SUM(qtysold*pricepaid) AS rev
+  	SUM(pricepaid) AS rev,
+  	SUM(rev) OVER(PARTITION BY month_num) AS month_rev,
+    SUM(rev) OVER(PARTITION BY month_num, catname) AS cat_rev,
+	SUM(rev) OVER(PARTITION BY month_num, venuename2) AS venue_rev,
+    SUM(rev) OVER(PARTITION BY month_num, sales.eventid) AS eventid_rev,
+  	SUM(rev) OVER(ORDER BY month_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS month_nondet_RT,
+  	SUM(rev) OVER(PARTITION BY catname ORDER BY month_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cat_nondet_RT,
+  	SUM(rev) OVER(PARTITION BY venuename2 ORDER BY month_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS venue_nondet_RT,
+  	SUM(rev) OVER(PARTITION BY sales.eventid ORDER BY month_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS eventid_nondet_RT,
+  	CONVERT(INTEGER, COUNT(*) OVER(PARTITION BY month_num, catname)) AS num_rows
+
   FROM sales
   LEFT JOIN date
   	ON sales.dateid = date.dateid
@@ -18,20 +28,133 @@ WITH sales AS(
   LEFT JOIN venue
   	ON venue.venueid = event.venueid
   GROUP BY month_num, catname, venuename2, eventname, sales.eventid
+  ORDER BY month_num
 )
-
+--, table2 AS( -- use to check monthly RTs/% diff
 SELECT
   month_num,
-  SUM(rev) OVER(PARTITION BY month_num) AS month_rev,
+  DENSE_RANK() OVER(ORDER BY month_rev DESC) AS month_rank,
+  month_rev,
+  MAX(month_nondet_RT) OVER(PARTITION BY month_num) AS monthly_RT,
   catname,
-  SUM(rev) OVER(PARTITION BY month_num, catname) AS cat_rev,
+  DENSE_RANK() OVER(PARTITION BY month_num ORDER BY cat_rev DESC) AS cat_rank,
+  cat_rev,
+  --CONVERT(INTEGER, ROW_NUMBER() OVER(PARTITION BY month_num, catname ORDER BY month_num, cat_rev, venue_rev, eventid_rev)) AS inv_row_number,
+  --LAG(cat_rev, num_rows) OVER(PARTITION BY month_num ORDER BY month_num, cat_rev DESC, venue_rev DESC, eventid_rev DESC) AS lag1,
+  COALESCE(
+    CONCAT(
+    	ROUND(100*(
+            (cat_rev - LAG(cat_rev, num_rows) OVER(PARTITION BY month_num ORDER BY cat_rev DESC))
+              /
+            LAG(cat_rev, num_rows) OVER(PARTITION BY month_num ORDER BY cat_rev DESC)), 1),
+    '%'),
+  '') AS cat_pct_diff_btwn_rank_by_month,
+  MAX(cat_nondet_RT) OVER(PARTITION BY catname, month_num) AS cat_monthly_RT,
   venuename2,
-  SUM(rev) OVER(PARTITION BY month_num, catname, venuename2) AS venue_rev,
-  SUM(rev) OVER(PARTITION BY venuname2 ORDER BY month_num ROWS )
+  DENSE_RANK() OVER(PARTITION BY month_num, catname ORDER BY venue_rev DESC) AS venue_rank,  
+  venue_rev,
+  MAX(venue_nondet_RT) OVER(PARTITION BY venuename2, month_num) AS venue_monthly_RT,
   eventname,
   eventid,
-  SUM(rev) OVER(PARTITION BY month_num, catname, venuename2, sales2.eventid) AS eventid_rev,
-  SUM(rev) OVER(PARTITION BY sales2.eventid ORDER BY month_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS eventid_RT
-FROM sales2
-WHERE venuename2 = 'LP Field'
+  DENSE_RANK() OVER(PARTITION BY month_num, catname, venuename2 ORDER BY eventid_rev DESC) AS eventid_rank,
+  eventid_rev,
+  MAX(eventid_nondet_RT) OVER(PARTITION BY sales.eventid, month_num) AS eventid_monthly_RT
+FROM sales
 ORDER BY month_num, cat_rev DESC, venue_rev DESC, eventid_rev DESC
+--) -- use to check monthly RTs/% diffs
+
+------ RT checks, month_num 12 total should be 110765431 ------
+
+-- checking monthly RT --
+/**
+SELECT
+	month_num,
+    month_rev,
+    monthly_RT
+FROM table2
+GROUP BY month_num, month_rev, monthly_RT
+ORDER BY month_num
+**/
+
+-- checking category RT --
+/**
+SELECT
+	catname,
+	month_num,
+    cat_rev,
+    cat_monthly_RT
+FROM table2
+GROUP BY catname, month_num, cat_rev, cat_monthly_RT
+ORDER BY catname, month_num
+**/
+
+-- checking venue RT--
+/**
+SELECT
+	venuename2,
+    month_num,
+    venue_rev,
+    venue_monthly_RT
+FROM table2
+GROUP BY venuename2, month_num, venue_rev, venue_monthly_RT
+ORDER BY venuename2, month_num
+**/
+
+-- checking event ID RT --
+/**
+SELECT
+	eventname,
+    eventid,
+    month_num,
+    eventid_rev,
+    eventid_monthly_RT
+FROM table2
+GROUP BY eventname, eventid, month_num, eventid_rev, eventid_monthly_RT
+ORDER BY eventname, eventid, month_num
+**/
+
+
+------ Checking Percent Differences ------
+/**
+SELECT 
+	month_num,
+    cat_rank,
+    catname,
+    cat_rev,
+    cat_pct_diff_btwn_rank_by_month
+FROM table2
+GROUP BY 
+	month_num,
+    cat_rank,
+    catname,
+    cat_rev,
+    cat_pct_diff_btwn_rank_by_month
+ORDER BY month_num, cat_rank
+**/
+
+
+/** using subset of data to find structure of formula for % change by rank
+
+SELECT 
+	month_num,
+	catname,
+    cat_rank,
+    cat_rev,
+    cat_pct_diff_btwn_rank_by_month
+    /**COALESCE(
+      (cat_rev - LAG(cat_rev, 1) OVER(PARTITION BY month_num ORDER BY month_num, cat_rev DESC))
+        /
+      LAG(cat_rev, 1) OVER(PARTITION BY month_num ORDER BY month_num, cat_rev DESC)
+      , 0) AS testing
+   	,LAG(cat_rev, 1) OVER(PARTITION BY month_num ORDER BY month_num, cat_rank) AS cat_rev_lag,
+    COALESCE((cat_rev - cat_rev_lag)/cat_rev_lag,0) AS cat_rev_pct_diff
+    **/
+FROM table2
+GROUP BY
+	month_num,
+	catname,
+	cat_rank,
+    cat_rev,
+    cat_pct_diff_btwn_rank_by_month
+ORDER BY month_num, cat_rank 
+**/
